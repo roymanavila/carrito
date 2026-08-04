@@ -2963,11 +2963,21 @@ function ScannerModal({ stores, onClose, onProductScanned, pantryMode = false })
       setCameraState('requesting');
       setErrorMsg(null);
       try {
+        // Solo formatos de retail con checksum verificable. Quitamos code_128,
+        // code_39 y qr_code: code_39 en particular genera lecturas parciales
+        // repetibles que pasaban la confirmación múltiple → data errada.
         detectorRef.current = new window.BarcodeDetector({
-          formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
+          formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e']
         });
+        // Resolución alta + enfoque continuo: sin esto algunos teléfonos
+        // entregan 640x480 borroso y el detector no alcanza a leer EAN pequeños.
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } },
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            advanced: [{ focusMode: 'continuous' }]
+          },
           audio: false
         });
         if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
@@ -2987,15 +2997,18 @@ function ScannerModal({ stores, onClose, onProductScanned, pantryMode = false })
           if (cancelled || detectedRef.current || !videoRef.current || !detectorRef.current) return;
           try {
             const codes = await detectorRef.current.detect(videoRef.current);
-            if (!codes || codes.length === 0 || !codes[0].rawValue) return;
-            const barcode = codes[0].rawValue;
+            if (!codes || codes.length === 0) return;
 
-            // 1. Descartar lecturas con checksum inválido (corruptas)
-            if (!isLikelyValidBarcode(barcode)) {
+            // 1. Elegir la PRIMERA lectura con checksum válido del frame
+            //    (antes se tomaba codes[0] a ciegas: podía ser un código
+            //    vecino o una lectura corrupta que reseteaba el buffer)
+            const valid = codes.find(c => c.rawValue && isLikelyValidBarcode(c.rawValue));
+            if (!valid) {
               bufferRef.current = []; // reset
               setReadProgress(null);
               return;
             }
+            const barcode = valid.rawValue;
 
             // 2. Agregar al buffer y conservar solo las últimas N
             bufferRef.current.push(barcode);
